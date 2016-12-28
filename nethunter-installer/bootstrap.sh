@@ -65,6 +65,7 @@ case $choice in
 esac
 
 clonecmd="$clonecmd --branch $clonebranch $cloneurl devices"
+
 echo "Running command: $clonecmd"
 
 $clonecmd || ABORT "Failed to git clone devices!"

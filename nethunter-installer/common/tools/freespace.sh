@@ -42,7 +42,6 @@ Wallet
 HoloSpiralWallpaper
 BasicDreams
 PhaseBeam
-LiveWallpapersPicker
 "
 
 IFS="
