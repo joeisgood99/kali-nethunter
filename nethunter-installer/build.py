@@ -1,6 +1,6 @@
 #!/usr/bin/python
 import os
-import urllib2
+import requests
 import zipfile
 import fnmatch
 import shutil
@@ -8,6 +8,12 @@ import ConfigParser
 import re
 import argparse
 import datetime
+import hashlib
+
+dl_headers = {
+	"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.51 Safari/537.36",
+	"Accept-Encoding":"identity"
+}
 
 def copytree(src, dst):
 	def shouldcopy(f):
@@ -33,43 +39,68 @@ def copytree(src, dst):
 					os.remove(dfile)
 				shutil.copy2(sfile, ddir)
 
-def download(url, file_name):
-	# Progress bar http://stackoverflow.com/a/22776
-	f = open(file_name, 'wb')
-	failed = False
+def download(url, file_name, verify_sha):
 	try:
-		u = urllib2.urlopen(url)
-		meta = u.info()
-		file_size = int(meta.getheaders('Content-Length')[0])
-		print 'Downloading: %s (%s bytes)' % (os.path.basename(file_name), file_size)
-		file_size_dl = 0
-		block_sz = 8192
-		while True:
-			file_buf = u.read(block_sz)
-			if not file_buf:
-				break
-			file_size_dl += len(file_buf)
-			f.write(file_buf)
-			status = r"%10d  [%3.2f%%]" % (file_size_dl, file_size_dl * 100. / file_size)
+		u = requests.get(url, stream=True, headers=dl_headers)
+		u.raise_for_status()
+	except requests.exceptions.RequestException as e:
+		abort(str(e))
+
+	download_ok = False
+
+	if u.headers.get('Content-Length'):
+		file_size = int(u.headers['Content-Length'])
+		print('Downloading: %s (%s bytes)' % (os.path.basename(file_name), file_size))
+	else:
+		file_size = 0
+		print('Downloading: %s (unknown size)' % os.path.basename(file_name))
+
+	sha = hashlib.sha512()
+	f = open(file_name, 'wb')
+	try:
+		dl_bytes = 0
+		for chunk in u.iter_content(chunk_size=8192):
+			if not chunk:
+				continue # Ignore empty chunks
+			f.write(chunk)
+			sha.update(chunk)
+			dl_bytes += len(chunk)
+			if file_size:
+				status = r"%10d  [%3.2f%%]" % (dl_bytes, dl_bytes * 100. / file_size)
+			else:
+				status = r"%10d" % dl_bytes
+
 			status = status + chr(8) * (len(status) + 1)
 			print status,
-	except urllib2.HTTPError, e:
-		print('HTTPError = ' + str(e.code))
-		failed = True
-	except urllib2.URLError, e:
-		print('')
-		print('URLError = ' + str(e.reason))
-		failed = True
-	except:
-		print('')
-		failed = True
-	else:
-		print('')
-		print('Download OK: ' + file_name)
+		print
+		download_ok = True
+	except requests.exceptions.RequestException as e:
+		print
+		print('Error: ' + str(e))
+	except KeyboardInterrupt:
+		print
+		print('Download cancelled')
 
+	f.flush()
+	os.fsync(f.fileno())
 	f.close()
 
-	if failed:
+	if download_ok:
+		sha = sha.hexdigest()
+		print('SHA512: ' + sha)
+		if verify_sha:
+			print('Expect: ' + verify_sha)
+			if sha == verify_sha:
+				print('Hash matches: OK')
+			else:
+				download_ok = False
+				print('Hash mismatch!')
+		else:
+			print('Warning: No SHA512 hash specified for verification!')
+
+	if download_ok:
+		print('Download OK: ' + file_name)
+	else:
 		# We should delete partially downloaded file so the next try doesn't skip it!
 		if os.path.isfile(file_name):
 			os.remove(file_name)
@@ -79,15 +110,12 @@ def download(url, file_name):
 def supersu(forcedown, beta):
 	def getdlpage(url):
 		try:
-			bOpener = urllib2.build_opener()
-			bOpener.addheaders = [("User-agent", "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/33.0.1750.146 Safari/537.36")]
-			pResponse = bOpener.open(url)
-			return pResponse.geturl()
-
-		except urllib2.HTTPError, e:
-			print('HTTPError = ' + str(e.code))
-		except urllib2.URLError, e:
-			print('URLError = ' + str(e.reason))
+			u = requests.head(url, headers=dl_headers)
+			return u.url;
+		except requests.exceptions.ConnectionError as e:
+			print('Connection error: ' + str(e))
+		except requests.exceptions.RequestException as e:
+			print('Error: ' + str(e))
 
 	suzip = os.path.join('update', 'supersu.zip')
 
@@ -102,23 +130,34 @@ def supersu(forcedown, beta):
 		if beta:
 			surl = getdlpage('https://download.chainfire.eu/supersu-beta')
 		else:
-			surl = getdlpage('https://download.chainfire.eu/1016/SuperSU/UPDATE-SuperSU-v2.79-20161211114519.zip')
+			surl = getdlpage('https://download.chainfire.eu/1021/SuperSU/SR3-SuperSU-v2.79-SR3-20170114223742.zip')
 
 		if surl:
-			download(surl + '?retrieve_file=1', suzip)
+			if beta:
+				download(surl + '?retrieve_file=1', suzip, False)
+			else:
+				download(surl + '?retrieve_file=1', suzip, '8d6b74477e66c548a0492dd6aa75b14e3eb682e26d3b14992bb163fc5c748b9348e8489aaa8da40821bd5849d1de186bdb563b8f9d43cb1fd5fed7e30c09d78b')
 		else:
 			abort('Could not retrieve download URL for SuperSU')
 
 def allapps(forcedown):
 	apps = {
-		'Hackerskeyboard':'https://f-droid.org/repo/org.pocketworkstation.pckeyboard_1038002.apk',
-		'Drivedroid':'https://softwarebakery.com/apps/drivedroid/files/drivedroid-free-0.10.28.apk',
-		'OpenVPN':'https://f-droid.org/repo/de.blinkt.openvpn_141.apk',
-		'USBKeyboard':'https://github.com/pelya/android-keyboard-gadget/raw/master/USB-Keyboard.apk',
-		'RFAnalyzer':'https://github.com/demantz/RFAnalyzer/raw/master/RFAnalyzer.apk',
-		'Shodan':'https://github.com/PaulSec/Shodan.io-mobile-app/raw/master/io.shodan.app.apk',
-		'RouterKeygen':'https://github.com/routerkeygen/routerkeygenAndroid/releases/download/v3.15.0/routerkeygen-3-15-0.apk',
-		'cSploit':'https://github.com/cSploit/android/releases/download/v1.6.6-rc.2/cSploit-release.apk'
+		'Hackerskeyboard':
+			['https://f-droid.org/repo/org.pocketworkstation.pckeyboard_1039003.apk', '8c861c7540e6eeb006070d0f2d80134e75637066591d705b987e164c3fe87521ed694ac844c945eb74449aff8723ff039f793b2e3743aac73865f74bb248edf5'],
+		'Drivedroid':
+			['https://softwarebakery.com/apps/drivedroid/files/drivedroid-free-0.10.39.apk', 'f9db206642e783c478b9ba7a0fbee8a32b78cc6f919eb7a4fdf5e20dcc473e138917d043d3d17b15bd4e6b1fd202f422524085305b3658bd95903a346e8d1abc'],
+		'OpenVPN':
+			['https://f-droid.org/repo/de.blinkt.openvpn_145.apk', 'd7aba2038ce561c03e7763a71467d1423d0aea2747461651707e621312ae02538787b14eef669bf0100b2a7cb34361fbb2172f221db435126b13a5913dfc3907'],
+		'USBKeyboard': # Feb 3, 2015
+			['https://github.com/pelya/android-keyboard-gadget/raw/7ea69c684aa1/USB-Keyboard.apk', '18bced7b339a67c48fe31698cb54063bce8f3dd9f7d7f23d9e5c619697e8da5ab08312cf9a2fa0e3f445a584485db23d1e4c27e3ffc1448551bbaf486ccb11e9'],
+		'RFAnalyzer':
+			['https://github.com/demantz/RFAnalyzer/raw/version_1_13/RFAnalyzer.apk', '7793438b6fbe7288a0ca86de900f5f4e607168de8c97229d08d901c2424b0192bf9dc894f66439f59510c10fa26a26319a1b0d8ea276f6af927cebf677138230'],
+		'Shodan':
+			['https://github.com/PaulSec/Shodan.io-mobile-app/raw/v0.0.3-new/io.shodan.app.apk', 'a2ff39d8e7a86d8e0a14368fd278fb03212999b309bc102d39f76ff69ca2a373d3d62a95cea6dbee761ae81ff3daaf83846e49e8ccbf0760276d825493d08652'],
+		'RouterKeygen':
+			['https://github.com/routerkeygen/routerkeygenAndroid/releases/download/v3.15.0/routerkeygen-3-15-0.apk', '95fba11539597eced9f3347f627bf3b24c9abc3c7e039ae1552a9c42c8c70ce362720dc401b85b9faac080d64e67bf594625f80472a492baf676dbe93822fc9e'],
+		'cSploit':
+			['https://github.com/cSploit/android/releases/download/v1.6.6-rc.2/cSploit-release.apk', 'b841c4376836bcc9d23fbc18b40eed70e08018e8eebc6d2d0abad59da63e4b325ffe4d8a4bd36107af63ed20a59c6648d6c4bd1264044267c86693744b15fa75'],
 	}
 
 	app_path = os.path.join('update', 'data', 'app')
@@ -129,6 +168,8 @@ def allapps(forcedown):
 	for key, value in apps.iteritems():
 		apk_name = key + '.apk'
 		apk_path = os.path.join(app_path, apk_name)
+		apk_url = value[0]
+		apk_hash = value[1] if len(value) == 2 else False
 
 		# For force redownload, remove previous APK
 		if os.path.isfile(apk_path):
@@ -139,41 +180,52 @@ def allapps(forcedown):
 
 		# Only download apk if we don't have it already
 		if not os.path.isfile(apk_path):
-			download(value, apk_path)
+			download(apk_url, apk_path, apk_hash)
 
 	print('Finished downloading all apps')
 
-def rootfs(forcedown, fs_size):
-	# global Arch
-	Arch = 'armhf'
+def rootfs(forcedown, fs_size, nightly):
+	global Arch
 
-	fs_file = 'kalifs-' + Arch + '-' + fs_size + '.tar.xz'
+	# temporary hack until arm64 support is completed
+	if Arch == 'arm64':
+		fs_arch = 'armhf'
+	else:
+		fs_arch = Arch
+
+	fs_file = 'kalifs-' + fs_arch + '-' + fs_size + '.tar.xz'
 	fs_path = os.path.join('rootfs', fs_file)
 
-	fs_host = 'https://images.offensive-security.com/'
-	fs_url = fs_host + 'kalifs-' + fs_size + '.tar.xz'
+	if nightly:
+		fs_host = 'https://build.nethunter.com/kalifs/kalifs-latest/'
+	else:
+		fs_host = 'https://images.offensive-security.com/'
 
-	# Uncomment to use build.nethunter.com kalifs builds (experimental)
-	# fs_host = 'https://build.nethunter.com/'
-	# fs_url = fs_host + 'kalifs/kalifs-latest/' + fs_file
+	fs_url = fs_host + fs_file
 
 	if forcedown:
 		# For force redownload, remove previous rootfs
-		print('Force redownloading Kali %s %s rootfs' % (Arch, fs_size))
+		print('Force redownloading Kali %s %s rootfs' % (fs_arch, fs_size))
 		if os.path.isfile(fs_path):
 			os.remove(fs_path)
 
 	# Only download Kali rootfs if we don't have it already
 	if os.path.isfile(fs_path):
-		print('Found Kali %s %s rootfs at: %s' % (Arch, fs_size, fs_path))
+		print('Found Kali %s %s rootfs at: %s' % (fs_arch, fs_size, fs_path))
 	else:
-		download(fs_url, fs_path)
+		print("Downloading from host: %s" % fs_host)
+		download(fs_url, fs_path, False) # We should add SHA512 retrieval function...
 
 def addrootfs(fs_size, dst):
-	# global Arch
-	Arch = 'armhf'
+	global Arch
 
-	fs_file = 'kalifs-' + Arch + '-' + fs_size + '.tar.xz'
+	# temporary hack until arm64 support is completed
+	if Arch == 'arm64':
+		fs_arch = 'armhf'
+	else:
+		fs_arch = Arch
+
+	fs_file = 'kalifs-' + fs_arch + '-' + fs_size + '.tar.xz'
 	fs_path = os.path.join('rootfs', fs_file)
 
 	try:
@@ -182,7 +234,7 @@ def addrootfs(fs_size, dst):
 		zf.write(os.path.abspath(fs_path), fs_file)
 		print('  Added: ' + fs_file)
 		zf.close()
-	except IOError, e:
+	except IOError as e:
 		print('IOError = ' + e.reason)
 		abort('Unable to add to the zip file')
 
@@ -198,7 +250,7 @@ def zip(src, dst):
 				zf.write(absname, arcname)
 				print('  Added: ' + arcname)
 		zf.close()
-	except IOError, e:
+	except IOError as e:
 		print('IOError = ' + e.reason)
 		abort('Unable to create the ZIP file')
 
@@ -282,7 +334,8 @@ def setupkernel():
 		'zImage', 'zImage-dtb',
 		'Image', 'Image-dtb',
 		'Image.gz', 'Image.gz-dtb',
-		'Image.lz4', 'Image.lz4-dtb'
+		'Image.lz4', 'Image.lz4-dtb',
+		'Image.fit'
 	]
 	kernel_found = False
 	for kernel_image in kernel_images:
@@ -426,6 +479,7 @@ def main():
 	parser.add_argument('--nosu', '-ns', action='store_true', help='Build without SuperSU installer')
 	parser.add_argument('--nobrand', '-nb', action='store_true', help='Build without wallpaper or boot animation')
 	parser.add_argument('--nofreespace', '-nf', action='store_true', help='Build without free space check')
+	parser.add_argument('--nightly', '-ni', action='store_true', help='Use nightly mirror for Kali rootfs download (experimental)')
 	parser.add_argument('--generic', '-g', action='store', metavar='ARCH', help='Build a generic installer (modify ramdisk only)')
 	parser.add_argument('--rootfs', '-fs', action='store', metavar='SIZE', help='Build with Kali chroot rootfs (full or minimal)')
 	parser.add_argument('--release', '-r', action='store', metavar='VERSION', help='Specify NetHunter release version')
@@ -504,7 +558,7 @@ def main():
 
 	# Download Kali rootfs if we are building a zip with the chroot environment included
 	if args.rootfs:
-		rootfs(args.forcedown, args.rootfs)
+		rootfs(args.forcedown, args.rootfs, args.nightly)
 
 	# Set file name tag depending on the options chosen	
 	file_tag = Device
