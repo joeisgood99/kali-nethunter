@@ -64,7 +64,7 @@ case $choice in
 		cloneurl="https://github.com/${GIT_ACCOUNT}/${GIT_REPOSITORY}.git" ;;
 esac
 
-clonecmd="$clonecmd --branch $clonebranch $cloneurl devices"
+clonecmd="$clonecmd https://github.com/joeisgood99/nethunter-devices.git devices"
 
 echo "Running command: $clonecmd"
 
